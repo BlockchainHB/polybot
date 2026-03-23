@@ -117,15 +117,15 @@ export const runAgentCycle = internalAction({
       // Tool-capable LLM for research stage (grok multi-agent doesn't support tool calling)
       const toolLlm = new OpenRouterProvider({
         apiKey: process.env.OPENROUTER_API_KEY!,
-        modelId: "anthropic/claude-opus-4-6",
+        modelId: "deepseek/deepseek-v3.2",
       });
 
       // Set up ensemble provider for trade decision validation
       const ensembleModelIds = [
-        "x-ai/grok-4.20-multi-agent-beta",
-        "anthropic/claude-opus-4-6",
-        "openai/gpt-5.4",
         "deepseek/deepseek-v3.2",
+        "google/gemini-3-flash-preview",
+        "openai/gpt-5.4",
+        "anthropic/claude-sonnet-4-6",
       ];
       const ensemble = new EnsembleProvider({
         apiKey: process.env.OPENROUTER_API_KEY!,
@@ -620,10 +620,10 @@ export const runCopyTradeCycle = internalAction({
       // Step 4: Ensemble LLM validation (multi-model consensus)
       const { EnsembleProvider: EP } = await import("../src/llm/multi-model-provider");
       const ensembleModelIds = [
-        "x-ai/grok-4.20-multi-agent-beta",
-        "anthropic/claude-opus-4-6",
-        "openai/gpt-5.4",
         "deepseek/deepseek-v3.2",
+        "google/gemini-3-flash-preview",
+        "openai/gpt-5.4",
+        "anthropic/claude-sonnet-4-6",
       ];
       const ensemble = new EP({
         apiKey: process.env.OPENROUTER_API_KEY!,

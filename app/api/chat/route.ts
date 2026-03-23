@@ -12,7 +12,7 @@ const openrouter = createOpenAICompatible({
 
 // Multi-model chat routing
 const FAST_MODEL = "x-ai/grok-4.20-beta";
-const HEAVY_MODEL = "anthropic/claude-opus-4-6";
+const HEAVY_MODEL = "openai/gpt-5.4";
 
 function classifyComplexity(message: string): "fast" | "heavy" {
   const lower = message.toLowerCase();

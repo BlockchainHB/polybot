@@ -261,10 +261,10 @@ export const DEFAULT_CONFIG: AgentConfig = {
   minConfidence: 0.6,
   modelId: "x-ai/grok-4.20-multi-agent-beta",
   ensembleModels: [
-    "x-ai/grok-4.20-multi-agent-beta",
-    "anthropic/claude-opus-4-6",
-    "openai/gpt-5.4",
     "deepseek/deepseek-v3.2",
+    "google/gemini-3-flash-preview",
+    "openai/gpt-5.4",
+    "anthropic/claude-sonnet-4-6",
   ],
   runIntervalMinutes: 15,
   enabled: true,
