@@ -2,6 +2,11 @@ import OpenAI from "openai";
 import { LLMProvider, LLMMessage, LLMToolDefinition, LLMResponse, LLMToolCall } from "@/src/types";
 import { withRetry } from "@/src/lib/retry";
 
+/** Strip markdown code fences (```json ... ```) from LLM responses before parsing */
+export function stripCodeFences(text: string): string {
+  return text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+}
+
 // ============================================================================
 // MODEL CONFIGURATION
 // ============================================================================
@@ -284,7 +289,7 @@ function computeConsensus(
   for (const vote of votes) {
     try {
       // Attempt to parse content as JSON
-      const parsed = vote.response.content ? JSON.parse(vote.response.content) : {};
+      const parsed = vote.response.content ? JSON.parse(stripCodeFences(vote.response.content)) : {};
       parsedVotes.push({
         modelId: vote.modelId,
         action: parsed.action || parsed.recommendation || undefined,

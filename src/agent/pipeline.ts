@@ -8,6 +8,11 @@ import type {
   TradeDecision,
   ScreeningResult,
 } from "@/src/types";
+
+/** Strip markdown code fences from LLM responses before JSON.parse */
+function stripCodeFences(text: string): string {
+  return text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+}
 import { filterMarkets, scoreMarket } from "@/src/agent/market-scorer";
 import { checkRisk } from "@/src/agent/risk-manager";
 import {
@@ -109,7 +114,7 @@ export async function runPipeline(
       response_format: { type: "json_object" },
     });
 
-    const parsed = JSON.parse(screenResponse.content ?? "[]");
+    const parsed = JSON.parse(stripCodeFences(screenResponse.content ?? "[]"));
     // Handle various JSON wrappers the LLM might use
     let rawResults: Array<{
       conditionId: string;
@@ -226,7 +231,7 @@ export async function runPipeline(
       const decision: TradeDecision = {
         conditionId: market.conditionId,
         question: market.question,
-        ...JSON.parse(decisionResponse.content ?? "{}"),
+        ...JSON.parse(stripCodeFences(decisionResponse.content ?? "{}")),
       };
 
       if (decision.action === "skip") {

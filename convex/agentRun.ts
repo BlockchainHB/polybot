@@ -3,6 +3,11 @@
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 
+/** Strip markdown code fences from LLM responses before JSON.parse */
+function stripCodeFences(text: string): string {
+  return text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+}
+
 export const runAgentCycle = internalAction({
   args: {},
   handler: async (ctx) => {
@@ -205,7 +210,7 @@ Do you agree with this trade? Respond with JSON only:
             // Record ensemble vote to the ensembleVotes table
             const parsedVotes = ensembleResult.votes.map((v) => {
               try {
-                const parsed = JSON.parse(v.response.content ?? "{}");
+                const parsed = JSON.parse(stripCodeFences(v.response.content ?? "{}"));
                 return {
                   modelId: v.modelId,
                   action: (parsed.action ?? "skip") as "buy_yes" | "buy_no" | "skip",
@@ -713,7 +718,7 @@ export const runCopyTradeCycle = internalAction({
       // Record ensemble vote to the dedicated ensembleVotes table
       const copyTradeParsedVotes = ensembleResult.votes.map((v) => {
         try {
-          const parsed = JSON.parse(v.response.content ?? "{}");
+          const parsed = JSON.parse(stripCodeFences(v.response.content ?? "{}"));
           return {
             modelId: v.modelId,
             action: (parsed.action ?? "skip") as "buy_yes" | "buy_no" | "skip",
@@ -759,7 +764,7 @@ export const runCopyTradeCycle = internalAction({
       // Use the first successful model's structured response for per-signal validations
       for (const vote of ensembleResult.votes) {
         try {
-          const parsed = JSON.parse(vote.response.content ?? "{}");
+          const parsed = JSON.parse(stripCodeFences(vote.response.content ?? "{}"));
           const vList = parsed.validations ?? parsed.data ?? parsed.results ?? [];
           if (vList.length > 0) {
             // Apply ensemble consensus confidence as a multiplier
