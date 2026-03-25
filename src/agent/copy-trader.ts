@@ -24,7 +24,6 @@ import {
 } from "@/src/tools/polymarket-data-api";
 import { fetchMarketByCondition } from "@/src/tools/polymarket-scanner";
 import {
-  getTraderStats,
   getWinRate,
   getTraderActivity as getMultiSourceActivity,
   getLeaderboard as getMultiSourceLeaderboard,
@@ -179,6 +178,10 @@ export async function discoverTopTraders(
   const all30d = leaders30d.status === "fulfilled" ? leaders30d.value : [];
   const allTime = leadersAll.status === "fulfilled" ? leadersAll.value : [];
 
+  // Track which source provided the leaderboard data
+  const leaderboardSource = all7d.length > 0 ? (all7d[0] as any).source ?? "data_api" : "data_api";
+  console.log(`[COPY TRADE] Leaderboard source: ${leaderboardSource} (${all7d.length}/${all30d.length}/${allTime.length} entries)`);
+
   const traderMap = new Map<string, TraderRawStats>();
 
   function addEntries(entries: LeaderboardEntry[], window: "7d" | "30d" | "all") {
@@ -286,6 +289,9 @@ export async function discoverTopTraders(
       const lastActiveEstimate = t.rank7d < 100 ? Date.now() : Date.now() - 14 * 24 * 60 * 60 * 1000;
       const decayed = applyDecay(composite, lastActiveEstimate);
 
+      // Track which data source provided the win rate
+      const wrSource = (wr as any).source as string | undefined;
+
       return {
         address: t.address,
         username: t.username,
@@ -297,10 +303,12 @@ export async function discoverTopTraders(
         lastUpdated: Date.now(),
         roi: Math.round(blendedRoi * 10000) / 10000,
         realWinRate: Math.round(wr.winRate * 1000) / 1000,
+        onChainWinRate: (wr as any).onChainWinRate,
         consistency: Math.round(consistencyScore * 1000) / 1000,
         decayedScore: Math.round(decayed * 1000) / 1000,
         lastTradeAt: lastActiveEstimate,
-      };
+        dataSource: wrSource ?? (leaderboardSource || "data_api"),
+      } as TrackedTrader;
     })
     .sort((a, b) => (b.decayedScore ?? 0) - (a.decayedScore ?? 0))
     .slice(0, limit);
@@ -319,7 +327,7 @@ export interface NewTradeDetection {
 
 /**
  * Scan tracked traders for new activity since `sinceTimestamp`.
- * Uses multi-source detection: Bitquery → On-Chain RPC → Data API polling.
+ * Uses data source manager: Bitquery narrows active traders, Data API gets full details.
  */
 export async function scanTraderActivity(
   traders: TrackedTrader[],
@@ -329,77 +337,39 @@ export async function scanTraderActivity(
   const traderMap = new Map(traders.map((t) => [t.address.toLowerCase(), t]));
   const sinceMinutes = Math.ceil((Date.now() - sinceTimestamp) / 60_000);
 
-  // Try multi-source activity detection (Bitquery → RPC → Data API)
+  // Get enriched trades (Bitquery narrows, Data API always provides full details)
   const enrichedTrades = await getMultiSourceActivity(addresses, sinceMinutes);
 
-  if (enrichedTrades.length > 0) {
-    // Group by trader
-    const byTrader = new Map<string, TraderActivityItem[]>();
+  // Group by trader address
+  const byTrader = new Map<string, TraderActivityItem[]>();
 
-    for (const trade of enrichedTrades) {
-      const addr = trade.traderAddress.toLowerCase();
-      if (!byTrader.has(addr)) byTrader.set(addr, []);
-      byTrader.get(addr)!.push({
-        conditionId: trade.conditionId,
-        asset: trade.tokenId,
-        side: trade.side,
-        size: String(trade.size),
-        price: String(trade.price),
-        type: "TRADE",
-        timestamp: trade.timestamp,
-        title: trade.title,
-        outcome: trade.outcome,
-      });
-    }
+  for (const trade of enrichedTrades) {
+    const addr = trade.traderAddress.toLowerCase();
+    if (!traderMap.has(addr)) continue; // Skip if not a tracked trader
 
-    const results: NewTradeDetection[] = [];
-    for (const [addr, trades] of byTrader) {
-      const trader = traderMap.get(addr);
-      if (!trader) continue;
-      results.push({
-        traderAddress: trader.address,
-        traderUsername: trader.username,
-        traderScore: trader.decayedScore ?? trader.compositeScore,
-        trades,
-      });
-    }
-
-    return results;
+    if (!byTrader.has(addr)) byTrader.set(addr, []);
+    byTrader.get(addr)!.push({
+      conditionId: trade.conditionId,
+      asset: trade.tokenId,
+      side: trade.side,
+      size: String(trade.size),
+      price: String(trade.price),
+      type: "TRADE",
+      timestamp: trade.timestamp,
+      title: trade.title,
+      outcome: trade.outcome,
+    });
   }
 
-  // Pure fallback: original Data API polling (shouldn't reach here if any source is configured)
-  console.log(`[COPY TRADE] All multi-source APIs unavailable, using Data API polling`);
   const results: NewTradeDetection[] = [];
-  const BATCH_SIZE = 5;
-
-  for (let i = 0; i < traders.length; i += BATCH_SIZE) {
-    const batch = traders.slice(i, i + BATCH_SIZE);
-    const batchResults = await Promise.allSettled(
-      batch.map(async (trader) => {
-        const activity = await fetchTraderActivity(trader.address, 30);
-        const newTrades = activity.filter((a) => {
-          const activityTime = new Date(a.timestamp).getTime();
-          return a.type === "TRADE" && activityTime > sinceTimestamp;
-        });
-        return { trader, newTrades };
-      })
-    );
-
-    for (const result of batchResults) {
-      if (result.status === "fulfilled" && result.value.newTrades.length > 0) {
-        const { trader, newTrades } = result.value;
-        results.push({
-          traderAddress: trader.address,
-          traderUsername: trader.username,
-          traderScore: trader.decayedScore ?? trader.compositeScore,
-          trades: newTrades,
-        });
-      }
-    }
-
-    if (i + BATCH_SIZE < traders.length) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
+  for (const [addr, trades] of byTrader) {
+    const trader = traderMap.get(addr)!;
+    results.push({
+      traderAddress: trader.address,
+      traderUsername: trader.username,
+      traderScore: trader.decayedScore ?? trader.compositeScore,
+      trades,
+    });
   }
 
   return results;
@@ -428,8 +398,8 @@ export function deduplicateTrades(
           ? trade.outcome?.toLowerCase() === "no" ? "buy_no" : "buy_yes"
           : trade.outcome?.toLowerCase() === "no" ? "buy_yes" : "buy_no";
 
-      // Key format matches internalRecentTradeKeys: address:conditionId:side:size
-      const key = `${detection.traderAddress}:${trade.conditionId}:${side}:${parseFloat(trade.size)}`;
+      // Key format matches internalRecentTradeKeys: address:conditionId:side:size (all normalized)
+      const key = `${detection.traderAddress.toLowerCase()}:${trade.conditionId}:${side}:${parseFloat(trade.size)}`;
       if (!seenTradeKeys.has(key)) {
         unseenTrades.push(trade);
         newKeys.push(key);
@@ -585,6 +555,9 @@ export async function generateCopySignals(
   config: AgentConfig,
   existingPositionIds: string[]
 ): Promise<CopyTradeSignal[]> {
+  const totalTrades = detections.reduce((s, d) => s + d.trades.length, 0);
+  console.log(`[SIGNAL] Generating signals from ${detections.length} traders, ${totalTrades} trades, ${existingPositionIds.length} existing positions`);
+
   // Group trades by conditionId + side
   const marketSideMap = new Map<
     string,
@@ -643,21 +616,21 @@ export async function generateCopySignals(
   }
 
   const signals: CopyTradeSignal[] = [];
-  const totalTrackedTraders = detections.length || 1;
+  // Total active detections this cycle (traders who had trades)
+  const totalTracked = Math.max(detections.length, 1);
 
   for (const [, entry] of marketSideMap) {
     // Skip markets we already have a position in
     if (existingPositionIds.includes(entry.conditionId)) continue;
 
     const uniqueTraders = new Set(entry.traders.map((t) => t.address));
-    const consensus = uniqueTraders.size / totalTrackedTraders;
+    const consensus = totalTracked > 0 ? uniqueTraders.size / totalTracked : 0;
 
-    // Single trader with high score (>0.7) OR high conviction (>0.6) is enough
-    // Otherwise require 2+ traders
+    // These traders are already vetted (Falcon H-Score / leaderboard ROI-scored).
+    // Any single tracked trader's trade is a valid signal.
+    // Multi-trader consensus strengthens it, but 1 is enough.
+    // DeepSeek LLM is the final gatekeeper, not the consensus filter.
     const topTrader = entry.traders.reduce((a, b) => (a.score > b.score ? a : b));
-    const highConviction = entry.traders.some((t) => t.conviction > 0.6);
-    const minTraders = (topTrader.score > 0.7 || highConviction) ? 1 : 2;
-    if (uniqueTraders.size < minTraders) continue;
 
     // Position-aware filtering: check if lead trader is averaging down
     const avgingDown = await isAveragingDown(
@@ -665,11 +638,17 @@ export async function generateCopySignals(
       entry.conditionId,
       topTrader.price
     );
-    if (avgingDown) continue;
+    if (avgingDown) {
+      console.log(`[SIGNAL] Skipped ${entry.conditionId.slice(0, 10)}: trader averaging down`);
+      continue;
+    }
 
     // Validate the market (active, liquid, not closing)
     const marketCheck = await validateMarket(entry.conditionId);
-    if (!marketCheck.valid) continue;
+    if (!marketCheck.valid) {
+      console.log(`[SIGNAL] Skipped ${entry.conditionId.slice(0, 10)}: market invalid (${marketCheck.reason})`);
+      continue;
+    }
 
     // Use fresh price from market validation if available, else from CLOB midpoint
     let executionPrice = topTrader.price;
@@ -678,15 +657,18 @@ export async function generateCopySignals(
         ? marketCheck.freshPrice.yes
         : marketCheck.freshPrice.no;
     }
-    if (executionPrice <= 0) {
+    if (executionPrice <= 0 || isNaN(executionPrice)) {
       // Last resort: try CLOB midpoint directly
       const mid = await fetchFreshMidpoint(entry.tokenId);
       if (mid && mid > 0) executionPrice = mid;
     }
+    // Skip signal if we still can't get a valid price
+    if (executionPrice <= 0 || isNaN(executionPrice)) continue;
 
     // Calculate weighted average score (conviction-weighted)
     const totalWeight = entry.traders.reduce((s, t) => s + t.score * t.conviction, 0);
-    const avgTraderScore = totalWeight / entry.traders.length;
+    const avgTraderScore = entry.traders.length > 0 ? totalWeight / entry.traders.length : 0;
+    if (isNaN(avgTraderScore) || isNaN(totalWeight)) continue;
 
     // Sizing: scale with conviction, consensus, and trader quality
     const maxConviction = Math.max(...entry.traders.map((t) => t.conviction));
@@ -721,6 +703,8 @@ export async function generateCopySignals(
       reasoning,
     });
   }
+
+  console.log(`[SIGNAL] ${marketSideMap.size} market groups → ${signals.length} signals after filtering`);
 
   // Sort by conviction × score × consensus
   signals.sort((a, b) => b.consensus * b.traderScore - a.consensus * a.traderScore);

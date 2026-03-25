@@ -99,69 +99,72 @@ export async function fetchRecentTraderEvents(
     }
 
     const startBlock = latestBlock - blockRange;
-
-    // Query TransferSingle events from CTF contract filtered by trader addresses
-    // TransferSingle(operator, from, to, id, value)
-    // We look for transfers TO our tracked addresses (buys) or FROM them (sells)
     const trades: OnChainTrade[] = [];
 
-    for (const addr of addresses) {
-      // Buys: transfers TO the address
-      const buyLogs = await rpcCall("eth_getLogs", [{
-        fromBlock: "0x" + startBlock.toString(16),
-        toBlock: "0x" + latestBlock.toString(16),
-        address: CTF_CONTRACT,
-        topics: [
-          TRANSFER_SINGLE_TOPIC,
-          null, // operator (any)
-          null, // from (any)
-          padAddress(addr), // to = our trader
-        ],
-      }]);
+    // TransferSingle(operator, from, to, id, value)
+    // topics[0] = event sig, topics[1] = operator, topics[2] = from, topics[3] = to
+    // Query in small batches to avoid RPC limits
+    const BATCH = 5;
+    for (let i = 0; i < addresses.length; i += BATCH) {
+      const batch = addresses.slice(i, i + BATCH);
 
-      for (const log of (buyLogs ?? [])) {
-        const tokenId = log.topics?.[3] ? "0x" + BigInt(log.topics[3]).toString(16) : "";
-        const size = log.data ? hexToNumber(log.data.slice(0, 66)) / 1e6 : 0; // USDC decimals
+      for (const addr of batch) {
+        try {
+          // Buys: transfers TO the address (topic[3] = to)
+          const buyLogs = await rpcCall("eth_getLogs", [{
+            fromBlock: "0x" + startBlock.toString(16),
+            toBlock: "0x" + latestBlock.toString(16),
+            address: CTF_CONTRACT,
+            topics: [
+              TRANSFER_SINGLE_TOPIC,
+              null,
+              null,
+              padAddress(addr),
+            ],
+          }]);
 
-        trades.push({
-          traderAddress: addr,
-          tokenId,
-          side: "BUY",
-          size,
-          txHash: log.transactionHash ?? "",
-          blockNumber: hexToNumber(log.blockNumber ?? "0"),
-          timestamp: Date.now(), // Will be refined from block timestamp
-          logIndex: hexToNumber(log.logIndex ?? "0"),
-        });
-      }
+          for (const log of (buyLogs ?? [])) {
+            trades.push({
+              traderAddress: addr,
+              tokenId: log.topics?.[3] ?? "",
+              side: "BUY",
+              size: log.data ? parseInt(log.data.slice(66, 130), 16) / 1e6 : 0,
+              txHash: log.transactionHash ?? "",
+              blockNumber: hexToNumber(log.blockNumber ?? "0"),
+              timestamp: Date.now(),
+              logIndex: hexToNumber(log.logIndex ?? "0"),
+            });
+          }
 
-      // Sells: transfers FROM the address
-      const sellLogs = await rpcCall("eth_getLogs", [{
-        fromBlock: "0x" + startBlock.toString(16),
-        toBlock: "0x" + latestBlock.toString(16),
-        address: CTF_CONTRACT,
-        topics: [
-          TRANSFER_SINGLE_TOPIC,
-          null, // operator (any)
-          padAddress(addr), // from = our trader
-          null, // to (any)
-        ],
-      }]);
+          // Sells: transfers FROM the address (topic[2] = from)
+          const sellLogs = await rpcCall("eth_getLogs", [{
+            fromBlock: "0x" + startBlock.toString(16),
+            toBlock: "0x" + latestBlock.toString(16),
+            address: CTF_CONTRACT,
+            topics: [
+              TRANSFER_SINGLE_TOPIC,
+              null,
+              padAddress(addr),
+              null,
+            ],
+          }]);
 
-      for (const log of (sellLogs ?? [])) {
-        const tokenId = log.topics?.[3] ? "0x" + BigInt(log.topics[3]).toString(16) : "";
-        const size = log.data ? hexToNumber(log.data.slice(0, 66)) / 1e6 : 0;
-
-        trades.push({
-          traderAddress: addr,
-          tokenId,
-          side: "SELL",
-          size,
-          txHash: log.transactionHash ?? "",
-          blockNumber: hexToNumber(log.blockNumber ?? "0"),
-          timestamp: Date.now(),
-          logIndex: hexToNumber(log.logIndex ?? "0"),
-        });
+          for (const log of (sellLogs ?? [])) {
+            trades.push({
+              traderAddress: addr,
+              tokenId: log.topics?.[3] ?? "",
+              side: "SELL",
+              size: log.data ? parseInt(log.data.slice(66, 130), 16) / 1e6 : 0,
+              txHash: log.transactionHash ?? "",
+              blockNumber: hexToNumber(log.blockNumber ?? "0"),
+              timestamp: Date.now(),
+              logIndex: hexToNumber(log.logIndex ?? "0"),
+            });
+          }
+        } catch {
+          // Skip individual address failures
+          continue;
+        }
       }
     }
 

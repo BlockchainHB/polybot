@@ -11,7 +11,7 @@ import { withRetry } from "@/src/lib/retry";
 
 const BITQUERY_BASE = "https://streaming.bitquery.io/graphql";
 
-function getApiKey(): string {
+function getAccessToken(): string {
   return process.env.BITQUERY_API_KEY || "";
 }
 
@@ -37,15 +37,15 @@ export interface BitqueryWhaleTrade extends BitqueryTrade {
 // ---- GraphQL Helper ----
 
 async function queryBitquery(query: string, variables: Record<string, any> = {}): Promise<any> {
-  const apiKey = getApiKey();
-  if (!apiKey) return null;
+  const token = getAccessToken();
+  if (!token) return null;
 
   return withRetry(async () => {
     const res = await fetch(BITQUERY_BASE, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-API-KEY": apiKey,
+        "Authorization": `Bearer ${token}`,
       },
       body: JSON.stringify({ query, variables }),
     });
@@ -82,72 +82,110 @@ export async function fetchTraderRecentTrades(
   addresses: string[],
   sinceMinutes = 20
 ): Promise<BitqueryTrade[]> {
-  if (!getApiKey() || addresses.length === 0) return [];
+  if (!getAccessToken() || addresses.length === 0) return [];
 
   const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
-  const addrList = addresses.map((a) => `"${a.toLowerCase()}"`).join(", ");
 
   try {
-    const data = await queryBitquery(`
-      {
-        EVM(dataset: realtime, network: matic) {
-          DEXTrades(
-            where: {
-              Trade: {
-                Dex: {
-                  SmartContract: {
-                    is: "${CTF_EXCHANGE}"
+    // Query in batches of 10 addresses to avoid query size limits
+    const allTrades: BitqueryTrade[] = [];
+    const BATCH = 10;
+
+    for (let i = 0; i < addresses.length; i += BATCH) {
+      const batch = addresses.slice(i, i + BATCH);
+      const addrList = batch.map((a) => `"${a.toLowerCase()}"`).join(", ");
+
+      const data = await queryBitquery(`
+        {
+          EVM(dataset: realtime, network: matic) {
+            Transfers(
+              where: {
+                Transfer: {
+                  Currency: {
+                    SmartContract: { is: "${CTF_CONTRACT}" }
                   }
+                  Sender: { in: [${addrList}] }
                 }
+                Block: { Time: { after: "${since}" } }
               }
-              any: [
-                { Trade: { Buyer: { in: [${addrList}] } } }
-                { Trade: { Seller: { in: [${addrList}] } } }
-              ]
-              Block: { Time: { after: "${since}" } }
-            }
-            orderBy: { descending: Block_Time }
-            limit: { count: 100 }
-          ) {
-            Trade {
-              Buyer
-              Seller
-              Buy {
+              orderBy: { descending: Block_Time }
+              limit: { count: 50 }
+            ) {
+              Transfer {
+                Sender
+                Receiver
                 Currency { SmartContract }
                 Amount
-                Price
               }
-              Sell {
-                Currency { SmartContract }
-                Amount
-                Price
-              }
+              Transaction { Hash }
+              Block { Number Time }
             }
-            Transaction { Hash }
-            Block { Number Time }
           }
         }
+      `);
+
+      const sends = data?.EVM?.Transfers ?? [];
+      for (const t of sends) {
+        allTrades.push({
+          traderAddress: t.Transfer?.Sender?.toLowerCase() ?? "",
+          conditionId: "",
+          tokenId: t.Transfer?.Currency?.SmartContract ?? "",
+          side: "SELL",
+          size: parseFloat(t.Transfer?.Amount ?? "0"),
+          price: 0,
+          timestamp: t.Block?.Time ?? new Date().toISOString(),
+          txHash: t.Transaction?.Hash ?? "",
+          blockNumber: parseInt(t.Block?.Number ?? "0"),
+        });
       }
-    `);
 
-    const trades = data?.EVM?.DEXTrades ?? [];
-    return trades.map((t: any) => {
-      const buyer = t.Trade?.Buyer?.toLowerCase() ?? "";
-      const seller = t.Trade?.Seller?.toLowerCase() ?? "";
-      const isBuyer = addresses.some((a) => a.toLowerCase() === buyer);
+      // Also query receives (buys)
+      const dataRecv = await queryBitquery(`
+        {
+          EVM(dataset: realtime, network: matic) {
+            Transfers(
+              where: {
+                Transfer: {
+                  Currency: {
+                    SmartContract: { is: "${CTF_CONTRACT}" }
+                  }
+                  Receiver: { in: [${addrList}] }
+                }
+                Block: { Time: { after: "${since}" } }
+              }
+              orderBy: { descending: Block_Time }
+              limit: { count: 50 }
+            ) {
+              Transfer {
+                Sender
+                Receiver
+                Currency { SmartContract }
+                Amount
+              }
+              Transaction { Hash }
+              Block { Number Time }
+            }
+          }
+        }
+      `);
 
-      return {
-        traderAddress: isBuyer ? buyer : seller,
-        conditionId: t.Trade?.Buy?.Currency?.SmartContract ?? "",
-        tokenId: t.Trade?.Buy?.Currency?.SmartContract ?? "",
-        side: isBuyer ? "BUY" as const : "SELL" as const,
-        size: parseFloat(t.Trade?.Buy?.Amount ?? "0"),
-        price: parseFloat(t.Trade?.Buy?.Price ?? t.Trade?.Sell?.Price ?? "0"),
-        timestamp: t.Block?.Time ?? new Date().toISOString(),
-        txHash: t.Transaction?.Hash ?? "",
-        blockNumber: parseInt(t.Block?.Number ?? "0"),
-      };
-    });
+      const recvs = dataRecv?.EVM?.Transfers ?? [];
+      for (const t of recvs) {
+        allTrades.push({
+          traderAddress: t.Transfer?.Receiver?.toLowerCase() ?? "",
+          conditionId: "",
+          tokenId: t.Transfer?.Currency?.SmartContract ?? "",
+          side: "BUY",
+          size: parseFloat(t.Transfer?.Amount ?? "0"),
+          price: 0,
+          timestamp: t.Block?.Time ?? new Date().toISOString(),
+          txHash: t.Transaction?.Hash ?? "",
+          blockNumber: parseInt(t.Block?.Number ?? "0"),
+        });
+      }
+    }
+
+    return allTrades;
   } catch (err) {
     console.warn(`[bitquery] Failed to fetch trader trades: ${err}`);
     return [];
@@ -161,7 +199,7 @@ export async function fetchWhaleTrades(
   minSizeUsd = 10000,
   sinceMinutes = 60
 ): Promise<BitqueryWhaleTrade[]> {
-  if (!getApiKey()) return [];
+  if (!getAccessToken()) return [];
 
   const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
 
@@ -232,7 +270,7 @@ export async function fetchTokenVolume(
   tokenId: string,
   sinceMinutes = 60
 ): Promise<{ buyVolume: number; sellVolume: number; tradeCount: number }> {
-  if (!getApiKey()) return { buyVolume: 0, sellVolume: 0, tradeCount: 0 };
+  if (!getAccessToken()) return { buyVolume: 0, sellVolume: 0, tradeCount: 0 };
 
   const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
 
@@ -280,7 +318,7 @@ export async function fetchTokenVolume(
  * Check if Bitquery API is available.
  */
 export function isBitqueryAvailable(): boolean {
-  return !!getApiKey();
+  return !!getAccessToken();
 }
 
 export { CTF_EXCHANGE, CTF_CONTRACT, NEG_RISK_CTF_EXCHANGE };

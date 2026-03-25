@@ -59,7 +59,9 @@ export const upsertTrader = mutation({
     enabled: v.boolean(),
     roi: v.optional(v.float64()),
     realWinRate: v.optional(v.float64()),
+    onChainWinRate: v.optional(v.float64()),
     consistency: v.optional(v.float64()),
+    maxDrawdown: v.optional(v.float64()),
     copyPnl: v.optional(v.float64()),
     copyTradeCount: v.optional(v.float64()),
     copyWinCount: v.optional(v.float64()),
@@ -67,6 +69,7 @@ export const upsertTrader = mutation({
     avgHoldTime: v.optional(v.float64()),
     lastTradeAt: v.optional(v.float64()),
     disabledReason: v.optional(v.string()),
+    dataSource: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -102,7 +105,9 @@ export const internalUpsertTrader = internalMutation({
     enabled: v.boolean(),
     roi: v.optional(v.float64()),
     realWinRate: v.optional(v.float64()),
+    onChainWinRate: v.optional(v.float64()),
     consistency: v.optional(v.float64()),
+    maxDrawdown: v.optional(v.float64()),
     copyPnl: v.optional(v.float64()),
     copyTradeCount: v.optional(v.float64()),
     copyWinCount: v.optional(v.float64()),
@@ -110,6 +115,7 @@ export const internalUpsertTrader = internalMutation({
     avgHoldTime: v.optional(v.float64()),
     lastTradeAt: v.optional(v.float64()),
     disabledReason: v.optional(v.string()),
+    dataSource: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -259,7 +265,7 @@ export const internalRecentTradeKeys = internalQuery({
     return recent
       .filter((r) => r.detectedAt > args.sinceMs)
       .map(
-        (r) => `${r.traderAddress}:${r.conditionId}:${r.side}:${r.size}`
+        (r) => `${r.traderAddress.toLowerCase()}:${r.conditionId}:${r.side}:${parseFloat(String(r.size))}`
       );
   },
 });

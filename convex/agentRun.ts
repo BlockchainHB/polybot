@@ -524,9 +524,23 @@ export const runCopyTradeCycle = internalAction({
       console.log(`[COPY TRADE] Step 1: Loading tracked traders...`);
       let trackedTraders = await ctx.runQuery(internal.trackedTraders.internalEnabledTraders, {});
 
-      // Refresh from leaderboard every cycle (or if no traders tracked yet)
-      if (trackedTraders.length < 5) {
-        const topTraders = await discoverTopTraders(20);
+      // Refresh traders if we have too few, or if none have Falcon data
+      const tradersWithFalcon = trackedTraders.filter((t: any) => t.dataSource === "falcon");
+      const needsRefresh = trackedTraders.length < 5 || tradersWithFalcon.length === 0;
+      console.log(`[COPY TRADE] Traders: ${trackedTraders.length} total, ${tradersWithFalcon.length} from Falcon, needsRefresh: ${needsRefresh}`);
+      if (needsRefresh) {
+        console.log(`[COPY TRADE] Refreshing traders via Falcon H-Score...`);
+
+        // Disable all existing traders first — fresh Falcon list replaces them
+        for (const old of trackedTraders) {
+          await ctx.runMutation(internal.trackedTraders.internalAutoDisableTrader, {
+            address: old.address,
+            reason: "replaced_by_refresh",
+          });
+        }
+
+        const topTraders = await discoverTopTraders(30);
+        console.log(`[COPY TRADE] Discovered ${topTraders.length} traders, upserting...`);
 
         for (const trader of topTraders) {
           await ctx.runMutation(internal.trackedTraders.internalUpsertTrader, {
@@ -541,9 +555,11 @@ export const runCopyTradeCycle = internalAction({
             enabled: true,
             roi: trader.roi,
             realWinRate: trader.realWinRate,
+            onChainWinRate: (trader as any).onChainWinRate,
             consistency: trader.consistency,
             decayedScore: trader.decayedScore,
             lastTradeAt: trader.lastTradeAt,
+            dataSource: (trader as any).dataSource,
           });
         }
 
@@ -722,7 +738,7 @@ export const runCopyTradeCycle = internalAction({
       if (signals.length === 0) {
         await ctx.runMutation(internal.agentActions.internalLogAction, {
           type: "copy_trade_scan",
-          summary: "No consensus signals generated (insufficient trader agreement)",
+          summary: `No copy signals generated from ${detections.length} active trader(s) — trades may have been filtered by market validation, dedup, or invalid pricing`,
           details: { cycleId },
           timestamp: Date.now(),
           cycleId,
@@ -1041,12 +1057,17 @@ export const runCopyTradeCycle = internalAction({
     }
 
     // 24/7 mode: re-schedule immediately with a 30s cooldown
-    const continuousEntry = await ctx.runQuery(
-      internal.config.internalGetConfig,
-      { key: "copyTrade247" }
-    );
-    if (continuousEntry?.value === "true") {
-      await ctx.scheduler.runAfter(30_000, internal.agentRun.runCopyTradeCycle);
+    try {
+      const continuousEntry = await ctx.runQuery(
+        internal.config.internalGetConfig,
+        { key: "copyTrade247" }
+      );
+      if (continuousEntry?.value === "true") {
+        console.log(`[COPY TRADE] 24/7 mode: scheduling next cycle in 30s`);
+        await ctx.scheduler.runAfter(30_000, internal.agentRun.runCopyTradeCycle);
+      }
+    } catch (schedErr) {
+      console.error(`[COPY TRADE] Failed to schedule next 24/7 cycle: ${schedErr}`);
     }
   },
 });
@@ -1072,9 +1093,11 @@ export const refreshTrackedTraders = internalAction({
           enabled: true,
           roi: trader.roi,
           realWinRate: trader.realWinRate,
+          onChainWinRate: (trader as any).onChainWinRate,
           consistency: trader.consistency,
           decayedScore: trader.decayedScore,
           lastTradeAt: trader.lastTradeAt,
+          dataSource: (trader as any).dataSource,
         });
       }
 

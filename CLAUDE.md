@@ -1,6 +1,6 @@
 # Polymarket Copy-Trading Bot
 
-Autonomous Polymarket trading bot focused on **short-term price trading** and **elite copy-trading**. Copy-trade validation uses a single DeepSeek V3.2 call. Multi-source data from Falcon API, The Graph, Bitquery, and Alchemy.
+Autonomous Polymarket trading bot focused on **short-term price trading** and **elite copy-trading**. Copy-trade validation uses a single DeepSeek V3.2 call. Multi-source data from Falcon H-Score API, The Graph, Bitquery, and Alchemy.
 
 ## Trading Philosophy
 
@@ -24,7 +24,7 @@ The copy trading engine uses multiple data sources with automatic fallback:
 
 | Source | API | Used For | Fallback Priority |
 |--------|-----|----------|-------------------|
-| **Falcon API** | `polymarketanalytics.com` | Pre-computed trader stats (PnL, ROI, win rate, drawdown) | 1st (primary) |
+| **Falcon API** | `narrative.agent.heisenberg.so` | H-Score leaderboard (agent 584), Wallet 360 (agent 581), trades (agent 556) | 1st (primary) |
 | **The Graph** | Polymarket subgraph on Polygon | On-chain win rates from redemption data (ground truth) | 2nd |
 | **Bitquery** | `streaming.bitquery.io` (v2 GraphQL) | Real-time trade detection, whale trades | 1st for activity |
 | **Alchemy** | Polygon PoS RPC | Direct on-chain CTF contract event monitoring | 2nd for activity |
@@ -33,10 +33,21 @@ The copy trading engine uses multiple data sources with automatic fallback:
 | **Polymarket CLOB API** | `clob.polymarket.com` | Orderbook, midpoint prices, order execution | Always used |
 
 ### Fallback Chains
-- **Trader stats**: Falcon → Data API
-- **Win rates**: Falcon → The Graph (on-chain) → Data API heuristic
-- **Trader activity**: Bitquery → Alchemy RPC → Data API polling
-- **Leaderboard**: Falcon → Data API
+- **Leaderboard**: Falcon H-Score (agent 584) → Data API
+- **Win rates**: Falcon Wallet 360 (agent 581) → The Graph (on-chain) → Data API heuristic
+- **Trader activity**: Bitquery narrows active traders → Data API polls only those for full details
+- **Trader stats**: Falcon Wallet 360 → Data API
+
+### Falcon API (Heisenberg)
+Single endpoint: `POST https://narrative.agent.heisenberg.so/api/v2/semantic/retrieve/parameterized`
+Auth: `Authorization: Bearer <FALCON_API_KEY>`
+Switch data by changing `agent_id`:
+- **584** — H-Score Leaderboard (filters bots, lucky streaks, wash traders)
+- **581** — Wallet 360 (60+ metrics per wallet: PnL, ROI, win rate, drawdown, Sharpe)
+- **556** — Trade feed (historical trades by wallet, market, direction, time)
+- **579** — PnL Leaderboard (official Polymarket ranking)
+- **574** — Markets (search/filter by volume, slug, date)
+Full docs: https://prediction.heisenberg.so/prediction_market_api_context.md
 
 All sources are optional — the system gracefully degrades to the Polymarket Data API if no third-party keys are configured.
 
@@ -207,7 +218,7 @@ CONVEX_DEPLOYMENT=            # Convex deployment identifier
 
 Copy trade data sources (all optional, graceful fallback):
 ```
-FALCON_API_KEY=               # Falcon API (polymarketanalytics.com) — trader stats
+FALCON_API_KEY=               # Falcon API (narrative.agent.heisenberg.so) — H-Score traders
 THEGRAPH_API_KEY=             # The Graph subgraph API key — on-chain win rates
 BITQUERY_API_KEY=             # Bitquery v2 streaming API — real-time trade feeds
 ALCHEMY_RPC_URL=              # Alchemy Polygon PoS RPC — on-chain event monitoring
@@ -287,6 +298,8 @@ Every `withRetry` call automatically tracks API usage via a callback registered 
 - Grok 4.20 Multi-Agent Beta does NOT support tool calling through OpenRouter
 - Polymarket Data API leaderboard requires `/v1/` prefix and specific param names
 - LLMs return markdown-wrapped JSON even with `response_format: { type: "json_object" }` — always use `stripCodeFences()` before `JSON.parse`
-- Falcon API endpoints may vary — client tries multiple URL patterns with fallback
-- The Graph subgraph schema may differ from expected — queries try multiple shapes
-- Bitquery v2 uses `streaming.bitquery.io/graphql` (not v1 REST endpoints)
+- Falcon API is a single POST endpoint with `agent_id` — not REST-style paths
+- Bitquery v2 uses Bearer token auth via `streaming.bitquery.io/graphql` — token expires every 24h
+- Bitquery returns on-chain transfers (no conditionId/price) — always enriched via Data API
+- The Graph subgraph requires API key from https://thegraph.com/studio/apikeys/
+- Trader refresh disables all old traders before upserting new Falcon-sourced ones
