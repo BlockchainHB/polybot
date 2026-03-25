@@ -59,7 +59,9 @@ export const upsertTrader = mutation({
     enabled: v.boolean(),
     roi: v.optional(v.float64()),
     realWinRate: v.optional(v.float64()),
+    onChainWinRate: v.optional(v.float64()),
     consistency: v.optional(v.float64()),
+    maxDrawdown: v.optional(v.float64()),
     copyPnl: v.optional(v.float64()),
     copyTradeCount: v.optional(v.float64()),
     copyWinCount: v.optional(v.float64()),
@@ -67,6 +69,7 @@ export const upsertTrader = mutation({
     avgHoldTime: v.optional(v.float64()),
     lastTradeAt: v.optional(v.float64()),
     disabledReason: v.optional(v.string()),
+    dataSource: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -102,7 +105,9 @@ export const internalUpsertTrader = internalMutation({
     enabled: v.boolean(),
     roi: v.optional(v.float64()),
     realWinRate: v.optional(v.float64()),
+    onChainWinRate: v.optional(v.float64()),
     consistency: v.optional(v.float64()),
+    maxDrawdown: v.optional(v.float64()),
     copyPnl: v.optional(v.float64()),
     copyTradeCount: v.optional(v.float64()),
     copyWinCount: v.optional(v.float64()),
@@ -110,6 +115,7 @@ export const internalUpsertTrader = internalMutation({
     avgHoldTime: v.optional(v.float64()),
     lastTradeAt: v.optional(v.float64()),
     disabledReason: v.optional(v.string()),
+    dataSource: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -242,6 +248,25 @@ export const recentTraderActivity = query({
       .withIndex("by_detectedAt")
       .order("desc")
       .take(args.limit ?? 50);
+  },
+});
+
+// Returns composite keys of recently logged activity for deduplication.
+// Keys use the format: traderAddress:conditionId:side:size — matches deduplicateTrades().
+export const internalRecentTradeKeys = internalQuery({
+  args: { sinceMs: v.float64() },
+  handler: async (ctx, args) => {
+    const recent = await ctx.db
+      .query("traderActivity")
+      .withIndex("by_detectedAt")
+      .order("desc")
+      .take(500);
+
+    return recent
+      .filter((r) => r.detectedAt > args.sinceMs)
+      .map(
+        (r) => `${r.traderAddress.toLowerCase()}:${r.conditionId}:${r.side}:${parseFloat(String(r.size))}`
+      );
   },
 });
 

@@ -122,7 +122,9 @@ export interface TrackedTrader {
   // Enhanced scoring
   roi?: number;
   realWinRate?: number;
+  onChainWinRate?: number;
   consistency?: number;
+  maxDrawdown?: number;
   copyPnl?: number;
   copyTradeCount?: number;
   copyWinCount?: number;
@@ -130,6 +132,7 @@ export interface TrackedTrader {
   avgHoldTime?: number;
   lastTradeAt?: number;
   disabledReason?: string;
+  dataSource?: string;
 }
 
 export interface TraderPerformance {
