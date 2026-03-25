@@ -1,13 +1,16 @@
 /**
- * Copy-Trading Engine v3
+ * Copy-Trading Engine v4
  *
- * Upgrades over v2:
- * - Conviction-weighted signals: trader position size relative to portfolio
- * - Fresh price fetching before execution (no stale trader prices)
- * - Market validation: checks active, liquidity, time-to-close
- * - Deduplication via transaction hash tracking
- * - Smarter sizing: scales with conviction, consensus, and trader quality
- * - Single-model validation (DeepSeek V3.2) instead of 4-model ensemble
+ * Upgrades over v3:
+ * - Multi-source data: Falcon API, The Graph subgraph, Bitquery, QuickNode/Alchemy
+ * - Automatic fallback chain: best source first, graceful degradation
+ * - On-chain win rates from The Graph (ground truth, not heuristic)
+ * - Real-time trade detection via Bitquery (sub-second vs 3-min polling)
+ * - Pre-computed trader stats from Falcon (replaces 80+ API calls)
+ *
+ * v3 features retained:
+ * - Conviction-weighted signals, fresh price fetching, market validation
+ * - Deduplication, smart sizing, single-model validation (DeepSeek V3.2)
  */
 
 import type { TrackedTrader, CopyTradeSignal, AgentConfig } from "@/src/types";
@@ -20,6 +23,14 @@ import {
   type TraderPosition,
 } from "@/src/tools/polymarket-data-api";
 import { fetchMarketByCondition } from "@/src/tools/polymarket-scanner";
+import {
+  getTraderStats,
+  getWinRate,
+  getTraderActivity as getMultiSourceActivity,
+  getLeaderboard as getMultiSourceLeaderboard,
+  logAvailableSources,
+  type DataSource,
+} from "@/src/tools/data-source-manager";
 
 // ---- Scoring Weights ----
 
@@ -148,15 +159,20 @@ function applyDecay(score: number, lastActiveMs: number): number {
 
 /**
  * Discover the best traders from the Polymarket leaderboard.
+ * Uses multi-source data: Falcon API → Data API fallback.
+ * Win rates enriched from: Falcon → The Graph → heuristic.
  */
 export async function discoverTopTraders(
   limit = 20,
   weights: TraderScoreWeights = DEFAULT_WEIGHTS
 ): Promise<TrackedTrader[]> {
+  logAvailableSources();
+
+  // Use multi-source leaderboard (Falcon → Data API)
   const [leaders7d, leaders30d, leadersAll] = await Promise.allSettled([
-    fetchLeaderboard("7d", 100),
-    fetchLeaderboard("30d", 100),
-    fetchLeaderboard("all", 100),
+    getMultiSourceLeaderboard("7d", 100),
+    getMultiSourceLeaderboard("30d", 100),
+    getMultiSourceLeaderboard("all", 100),
   ]);
 
   const all7d = leaders7d.status === "fulfilled" ? leaders7d.value : [];
@@ -208,14 +224,30 @@ export async function discoverTopTraders(
     .sort((a, b) => b.roi - a.roi)
     .slice(0, 40);
 
-  // Fetch real win rates in parallel (batched)
+  // Fetch real win rates — multi-source: Falcon → Subgraph → Data API heuristic
   const BATCH_SIZE = 5;
-  const winRateResults = new Map<string, { winRate: number; tradeCount: number; avgReturn: number; returns: number[] }>();
+  const winRateResults = new Map<string, { winRate: number; tradeCount: number; avgReturn: number; returns: number[]; onChainWinRate?: number; source?: string }>();
 
   for (let i = 0; i < byRoi.length; i += BATCH_SIZE) {
     const batch = byRoi.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
-      batch.map((t) => calculateRealWinRate(t.address))
+      batch.map(async (t) => {
+        // Try multi-source win rate first
+        const multiSource = await getWinRate(t.address);
+        if (multiSource && multiSource.tradeCount > 0) {
+          return {
+            winRate: multiSource.winRate,
+            tradeCount: multiSource.tradeCount,
+            avgReturn: 0,
+            returns: [],
+            onChainWinRate: multiSource.onChainWinRate,
+            source: multiSource.source,
+          };
+        }
+        // Fallback to Data API heuristic
+        const heuristic = await calculateRealWinRate(t.address);
+        return { ...heuristic, source: "data_api" };
+      })
     );
     results.forEach((r, idx) => {
       if (r.status === "fulfilled") {
@@ -287,12 +319,56 @@ export interface NewTradeDetection {
 
 /**
  * Scan tracked traders for new activity since `sinceTimestamp`.
- * Returns only new TRADE actions (not splits/merges/redemptions).
+ * Uses multi-source detection: Bitquery → On-Chain RPC → Data API polling.
  */
 export async function scanTraderActivity(
   traders: TrackedTrader[],
   sinceTimestamp: number
 ): Promise<NewTradeDetection[]> {
+  const addresses = traders.map((t) => t.address);
+  const traderMap = new Map(traders.map((t) => [t.address.toLowerCase(), t]));
+  const sinceMinutes = Math.ceil((Date.now() - sinceTimestamp) / 60_000);
+
+  // Try multi-source activity detection (Bitquery → RPC → Data API)
+  const enrichedTrades = await getMultiSourceActivity(addresses, sinceMinutes);
+
+  if (enrichedTrades.length > 0) {
+    // Group by trader
+    const byTrader = new Map<string, TraderActivityItem[]>();
+
+    for (const trade of enrichedTrades) {
+      const addr = trade.traderAddress.toLowerCase();
+      if (!byTrader.has(addr)) byTrader.set(addr, []);
+      byTrader.get(addr)!.push({
+        conditionId: trade.conditionId,
+        asset: trade.tokenId,
+        side: trade.side,
+        size: String(trade.size),
+        price: String(trade.price),
+        type: "TRADE",
+        timestamp: trade.timestamp,
+        title: trade.title,
+        outcome: trade.outcome,
+      });
+    }
+
+    const results: NewTradeDetection[] = [];
+    for (const [addr, trades] of byTrader) {
+      const trader = traderMap.get(addr);
+      if (!trader) continue;
+      results.push({
+        traderAddress: trader.address,
+        traderUsername: trader.username,
+        traderScore: trader.decayedScore ?? trader.compositeScore,
+        trades,
+      });
+    }
+
+    return results;
+  }
+
+  // Pure fallback: original Data API polling (shouldn't reach here if any source is configured)
+  console.log(`[COPY TRADE] All multi-source APIs unavailable, using Data API polling`);
   const results: NewTradeDetection[] = [];
   const BATCH_SIZE = 5;
 

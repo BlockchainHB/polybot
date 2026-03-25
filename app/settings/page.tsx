@@ -162,8 +162,12 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* API Usage Card */}
+      <ApiUsageCard />
+
       {/* Bot Config Card */}
       <Card>
+
         <CardHeader>
           <CardTitle className="text-lg">Bot Configuration</CardTitle>
         </CardHeader>
@@ -226,5 +230,100 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+const SERVICE_LABELS: Record<string, string> = {
+  falcon: "Falcon API",
+  subgraph: "The Graph",
+  bitquery: "Bitquery",
+  alchemy: "Alchemy RPC",
+  data_api: "Polymarket Data",
+  gamma_api: "Polymarket Gamma",
+  clob_api: "Polymarket CLOB",
+  openrouter: "OpenRouter (LLM)",
+  other: "Other",
+};
+
+function ApiUsageCard() {
+  const todayStats = useQuery(api.apiUsage.getTodaySummary);
+  const weekStats = useQuery(api.apiUsage.getUsageStats, { days: 7 });
+
+  // Aggregate weekly stats per service
+  const weekByService: Record<string, { calls: number; success: number; failure: number; latency: number }> = {};
+  if (weekStats) {
+    for (const row of weekStats) {
+      const existing = weekByService[row.service] ?? { calls: 0, success: 0, failure: 0, latency: 0 };
+      existing.calls += row.totalCalls;
+      existing.success += row.successCount;
+      existing.failure += row.failureCount;
+      existing.latency += row.totalLatencyMs;
+      weekByService[row.service] = existing;
+    }
+  }
+
+  const todayTotal = todayStats?.reduce((s, r) => s + r.totalCalls, 0) ?? 0;
+  const weekTotal = Object.values(weekByService).reduce((s, r) => s + r.calls, 0);
+
+  const services = Object.keys({ ...weekByService, ...(todayStats ? Object.fromEntries(todayStats.map((r) => [r.service, true])) : {}) });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-lg">API Usage</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-6 mb-4">
+          <div>
+            <p className="text-xs text-muted-foreground">Today</p>
+            <p className="text-2xl font-bold tabular-nums">{todayTotal}</p>
+            <p className="text-xs text-muted-foreground">calls</p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground">7-Day</p>
+            <p className="text-2xl font-bold tabular-nums">{weekTotal}</p>
+            <p className="text-xs text-muted-foreground">calls</p>
+          </div>
+        </div>
+
+        {services.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4">No API calls tracked yet. Usage will appear after the bot runs a cycle.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-muted-foreground text-xs">
+                  <th className="text-left py-2 px-2">Service</th>
+                  <th className="text-right py-2 px-2">Today</th>
+                  <th className="text-right py-2 px-2">7-Day</th>
+                  <th className="text-right py-2 px-2">Avg Latency</th>
+                  <th className="text-right py-2 px-2">Error Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {services.sort().map((svc) => {
+                  const today = todayStats?.find((r) => r.service === svc);
+                  const week = weekByService[svc];
+                  const avgLatency = week && week.calls > 0 ? Math.round(week.latency / week.calls) : 0;
+                  const errorRate = week && week.calls > 0 ? (week.failure / week.calls) * 100 : 0;
+
+                  return (
+                    <tr key={svc} className="border-b border-border/50 hover:bg-muted/30">
+                      <td className="py-2 px-2 font-medium">{SERVICE_LABELS[svc] ?? svc}</td>
+                      <td className="py-2 px-2 text-right tabular-nums">{today?.totalCalls ?? 0}</td>
+                      <td className="py-2 px-2 text-right tabular-nums">{week?.calls ?? 0}</td>
+                      <td className="py-2 px-2 text-right tabular-nums text-muted-foreground">{avgLatency}ms</td>
+                      <td className={`py-2 px-2 text-right tabular-nums ${errorRate > 10 ? "text-red-400" : errorRate > 0 ? "text-yellow-400" : "text-green-400"}`}>
+                        {errorRate.toFixed(1)}%
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

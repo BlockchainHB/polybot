@@ -1,6 +1,6 @@
 # Polymarket Copy-Trading Bot
 
-Autonomous Polymarket trading bot focused on **short-term price trading** and **elite copy-trading**, powered by a multi-model ensemble via OpenRouter.
+Autonomous Polymarket trading bot focused on **short-term price trading** and **elite copy-trading**. Copy-trade validation uses a single DeepSeek V3.2 call. Multi-source data from Falcon API, The Graph, Bitquery, and Alchemy.
 
 ## Trading Philosophy
 
@@ -10,130 +10,171 @@ This bot **trades the price, not the outcome**. It buys when price momentum is f
 
 - **Frontend**: Next.js 15 (App Router, Turbopack), React 19, TailwindCSS
 - **Backend**: Convex (real-time database + serverless functions)
+- **LLM (Copy Trade)**: DeepSeek V3.2 (`deepseek/deepseek-v3.2`) — single model, $0.26/M input
 - **LLM (Chat Fast)**: Grok 4.20 Beta via OpenRouter (`x-ai/grok-4.20-beta`) — tool calling
 - **LLM (Chat Heavy)**: GPT-5.4 via OpenRouter (`openai/gpt-5.4`) — complex analysis
 - **LLM (Agent Pipeline)**: Grok 4.20 Multi-Agent Beta (`x-ai/grok-4.20-multi-agent-beta`) — NO tool calling
 - **LLM (Research/Tools)**: DeepSeek V3.2 (`deepseek/deepseek-v3.2`) — tool calling, cheapest
 - **Markets**: Polymarket CLOB Client (Polygon, chain 137) + Gamma API
-- **Data**: Polymarket Data API (leaderboard, trader activity, positions)
 - **Streaming**: AI SDK v6 (`ai` + `@ai-sdk/react` + `@ai-sdk/openai-compatible`) with `streamText`, `stopWhen`, `useChat`
+
+## Data Sources (Multi-Source with Fallback)
+
+The copy trading engine uses multiple data sources with automatic fallback:
+
+| Source | API | Used For | Fallback Priority |
+|--------|-----|----------|-------------------|
+| **Falcon API** | `polymarketanalytics.com` | Pre-computed trader stats (PnL, ROI, win rate, drawdown) | 1st (primary) |
+| **The Graph** | Polymarket subgraph on Polygon | On-chain win rates from redemption data (ground truth) | 2nd |
+| **Bitquery** | `streaming.bitquery.io` (v2 GraphQL) | Real-time trade detection, whale trades | 1st for activity |
+| **Alchemy** | Polygon PoS RPC | Direct on-chain CTF contract event monitoring | 2nd for activity |
+| **Polymarket Data API** | `data-api.polymarket.com` | Leaderboard, trader activity, positions | Last resort |
+| **Polymarket Gamma API** | `gamma-api.polymarket.com` | Market data, search, events | Always used |
+| **Polymarket CLOB API** | `clob.polymarket.com` | Orderbook, midpoint prices, order execution | Always used |
+
+### Fallback Chains
+- **Trader stats**: Falcon → Data API
+- **Win rates**: Falcon → The Graph (on-chain) → Data API heuristic
+- **Trader activity**: Bitquery → Alchemy RPC → Data API polling
+- **Leaderboard**: Falcon → Data API
+
+All sources are optional — the system gracefully degrades to the Polymarket Data API if no third-party keys are configured.
+
+## Copy-Trade Engine v4
+
+### Pipeline (every 3 min, or 30s in 24/7 mode)
+1. **Discover** top traders via multi-source leaderboard (Falcon → Data API)
+2. **Scan** trader activity via multi-source detection (Bitquery → RPC → Data API)
+3. **Deduplicate** trades across cycles via composite keys
+4. **Detect exits** — mirror when tracked traders sell your positions
+5. **Generate signals** with conviction scoring and market validation
+6. **Validate** via single DeepSeek V3.2 call (not 4-model ensemble)
+7. **Fresh price** fetch from CLOB midpoint before execution
+8. **Execute** with price drift protection (skip if >5% drift)
+
+### Key Features
+- **Conviction scoring** — weighs signals by trader's position size relative to portfolio
+- **Market validation** — checks liquidity (>$500), time-to-close (>1hr), extreme prices before entering
+- **Fresh price execution** — fetches CLOB midpoint right before trade, not stale trader price
+- **Deduplication** — filters already-processed trades across cycles via composite keys
+- **Price drift protection** — skips trades if price moved >5% since signal detected
+- **On-chain win rates** — ground truth from The Graph subgraph redemptions
+- **Single-model validation** — DeepSeek V3.2 only (replaced 4-model ensemble)
+- **Copy-trade-only mode** — disables autonomous research pipeline
+- **24/7 continuous mode** — self-scheduling loop every 30s (toggle from UI)
+- **API usage tracking** — every API call tracked with service, latency, success/failure
+
+### Scoring Weights
+| Factor | Weight | Description |
+|--------|--------|-------------|
+| ROI | 30% | Profit / volume (capital efficiency) |
+| Real Win Rate | 25% | From Falcon/Subgraph/heuristic |
+| Consistency | 20% | Sharpe-like: mean return / stddev |
+| Volume | 10% | Proves conviction (log-normalized) |
+| Recency | 15% | 7d ranking matters most |
+
+All scores get exponential time decay (half-life: 7 days of inactivity).
 
 ## Model Architecture
 
+- **Copy-trade cycle** uses **only DeepSeek V3.2** ($0.26/M) — single call for signal validation
 - **Chat route** (`app/api/chat/route.ts`) uses **multi-model routing**:
-  - Fast queries (price checks, listings) → `x-ai/grok-4.20-beta`
-  - Complex queries (analysis, strategy) → `openai/gpt-5.4`
-  - Routing is automatic via keyword-based complexity classification
-- **Agent pipeline** uses `x-ai/grok-4.20-multi-agent-beta` for screening/decisions (no tools)
-- **Research stage** uses `deepseek/deepseek-v3.2` for tool-calling loops ($0.26/M input)
-- **Ensemble voting** (4 models validate trades in parallel):
-  - `deepseek/deepseek-v3.2` ($0.26/$0.38 — cheapest, IMO gold medal reasoning)
-  - `google/gemini-3-flash-preview` ($0.50/$3 — near-Pro agentic reasoning)
-  - `openai/gpt-5.4` ($2.50/$15 — strong general-purpose)
-  - `anthropic/claude-sonnet-4-6` ($3/$15 — best agentic coding/reasoning)
-  - All 4 support tool calling. Consensus: 3+ agree or 2+ with avg confidence > 0.7
-- All models accessed through **single OpenRouter API key** for unified billing
-
-## AI SDK v6 Notes
-
-- `tool()` uses `inputSchema` (not `parameters`)
-- `streamText` uses `stopWhen: stepCountIs(5)` (not `maxSteps: 5`)
-- Import `stepCountIs` from `"ai"`
-- LLMs sometimes return JSON wrapped in ` ```json ``` ` code fences even with `response_format: { type: "json_object" }` — always use `stripCodeFences()` before `JSON.parse`
+  - Fast queries → `x-ai/grok-4.20-beta`
+  - Complex queries → `openai/gpt-5.4`
+- **Agent pipeline** (disabled in copy-only mode) uses 4-model ensemble for validation:
+  - `deepseek/deepseek-v3.2`, `google/gemini-3-flash-preview`, `openai/gpt-5.4`, `anthropic/claude-sonnet-4-6`
+- All models accessed through **single OpenRouter API key**
 
 ## Project Structure
 
 ```
 polybot/
-├── app/                    # Next.js pages
-│   ├── page.tsx            # Dashboard (KPIs, P&L chart, markets)
-│   ├── chat/               # Chat interface
-│   │   └── page.tsx        # Chat UI with Streamdown markdown rendering
-│   ├── copy-trade/         # Copy-trading UI (traders, signals, activity)
-│   │   └── page.tsx        # 3-tab view: Tracked Traders, Signals, Activity
-│   ├── simulator/          # Bot simulator page
-│   │   └── page.tsx        # Backtest and simulate strategies
-│   ├── markets/            # Market browser + detail views
-│   ├── positions/          # Open positions + trade history
-│   ├── activity/           # Agent cycle history
-│   ├── settings/           # Config + wallet management
-│   └── api/chat/           # Streaming chat API route (5 Polymarket tools)
-│       └── route.ts        # streamText + tools (inputSchema) + stopWhen
-├── components/             # React components
-│   ├── dashboard/          # KpiStrip, PnlAreaChart, MarketGrid, AgentFeed
-│   ├── activity/           # CycleList, CycleCard, StageCard
-│   ├── markets/            # MarketHero, OrderBookPanel, OutcomesTable
-│   ├── nav/                # Sidebar navigation
-│   ├── providers/          # ConvexProvider
-│   └── ui/                 # Card, Button, Badge primitives
-├── convex/                 # Convex backend
-│   ├── schema.ts           # Database schema (13+ tables)
-│   ├── agentRun.ts         # Agent cycles: autonomous + copy-trading + auto-exit
-│   ├── trades.ts           # Trade CRUD
-│   ├── positions.ts        # Position CRUD (with TP/SL/exitReason)
-│   ├── trackedTraders.ts   # Tracked traders + signals + performance attribution
-│   ├── agentActions.ts     # Pipeline action logging
-│   ├── analytics.ts        # Daily/weekly performance metrics
-│   ├── config.ts           # Key-value config store
-│   ├── wallet.ts           # Mock/real wallet management (deduct/credit/reconcile)
-│   ├── botSimulator.ts     # Bot simulation backend
-│   ├── markets.ts          # Market data queries
-│   └── crons.ts            # Scheduled jobs (5 crons)
+├── app/
+│   ├── page.tsx                    # Dashboard (KPIs, P&L chart, markets)
+│   ├── copy-trade/page.tsx         # 5-tab copy trade dashboard (overview, traders, signals, activity, log)
+│   ├── chat/page.tsx               # Chat UI with Streamdown rendering
+│   ├── simulator/page.tsx          # Bot simulator
+│   ├── markets/                    # Market browser + detail views
+│   ├── positions/page.tsx          # Open positions + trade history
+│   ├── activity/                   # Agent cycle history
+│   ├── settings/page.tsx           # Config + wallet + API usage tracking
+│   └── api/chat/route.ts           # Streaming chat API (5 Polymarket tools)
+├── convex/
+│   ├── schema.ts                   # Database schema (15 tables)
+│   ├── agentRun.ts                 # Agent + copy-trade cycles + auto-exit
+│   ├── apiUsage.ts                 # API usage tracking (per-service daily counters)
+│   ├── trackedTraders.ts           # Traders + signals + performance + dedup keys
+│   ├── positions.ts                # Position CRUD (TP/SL/exitReason/copiedFrom)
+│   ├── trades.ts                   # Trade CRUD
+│   ├── agentActions.ts             # Pipeline action logging + ensemble votes
+│   ├── wallet.ts                   # Mock/real wallet (deduct/credit/reconcile)
+│   ├── config.ts                   # Key-value config store
+│   ├── analytics.ts                # Daily/weekly performance metrics
+│   ├── botSimulator.ts             # Bot simulation backend
+│   ├── markets.ts                  # Market data queries
+│   └── crons.ts                    # 5 scheduled jobs
 ├── src/
 │   ├── agent/
-│   │   ├── pipeline.ts     # 6-stage autonomous trading pipeline
-│   │   ├── copy-trader.ts  # Copy-trading engine v2 (ROI scoring, exit detection)
-│   │   ├── prompts.ts      # LLM prompts (price-trading focused)
-│   │   ├── market-scorer.ts # Short-term market filtering (hours-to-days)
-│   │   ├── risk-manager.ts # Risk checks (confidence, size, exposure)
-│   │   ├── convergence-trader.ts  # CEX price lag detection
-│   │   └── whale-tracker.ts       # $10K+ trade monitoring
+│   │   ├── copy-trader.ts          # Copy-trading engine v4 (multi-source, conviction)
+│   │   ├── pipeline.ts             # 6-stage autonomous trading pipeline
+│   │   ├── prompts.ts              # LLM prompts (price-trading focused)
+│   │   ├── market-scorer.ts        # Short-term market filtering
+│   │   └── risk-manager.ts         # Risk checks
 │   ├── llm/
-│   │   ├── openrouter.ts   # OpenRouter provider
-│   │   ├── provider.ts     # Provider factory
-│   │   ├── multi-model-provider.ts # Ensemble + ChatRouter + stripCodeFences
-│   │   └── types.ts        # LLM interface types
+│   │   ├── openrouter.ts           # OpenRouter provider (with request/response logging)
+│   │   ├── multi-model-provider.ts # Ensemble + ChatRouter (with logging)
+│   │   └── types.ts                # LLM interface types
 │   ├── tools/
-│   │   ├── polymarket-client.ts    # CLOB client (orders, orderbook)
-│   │   ├── polymarket-scanner.ts   # Gamma API (trending markets)
+│   │   ├── data-source-manager.ts  # Unified multi-source abstraction with fallback chains
+│   │   ├── falcon-api.ts           # Falcon API client (pre-computed trader stats)
+│   │   ├── polymarket-subgraph.ts  # The Graph subgraph client (on-chain win rates)
+│   │   ├── bitquery-client.ts      # Bitquery GraphQL client (real-time trade feeds)
+│   │   ├── polygon-rpc.ts          # Alchemy/QuickNode RPC client (on-chain events)
 │   │   ├── polymarket-data-api.ts  # Data API (leaderboard, activity, positions)
-│   │   ├── tool-registry.ts        # LLM tool definitions + executor
+│   │   ├── polymarket-scanner.ts   # Gamma API (trending markets)
+│   │   ├── polymarket-client.ts    # CLOB client (orders, orderbook)
+│   │   ├── polymarket-ws.ts        # WebSocket client (real-time prices)
+│   │   ├── tool-registry.ts        # LLM tool definitions
 │   │   ├── firecrawl-search.ts     # Web search
 │   │   ├── perplexity-search.ts    # Real-time Q&A
-│   │   ├── apify-scraper.ts        # Social sentiment
-│   │   └── polymarket-ws.ts        # WebSocket client
+│   │   └── apify-scraper.ts        # Social sentiment
 │   ├── lib/
-│   │   ├── retry.ts        # Exponential backoff retry utility
-│   │   ├── env.ts          # Environment variable helpers
-│   │   ├── chart-tools.ts  # Chart utility helpers
-│   │   ├── market-utils.tsx # Market display utilities
-│   │   └── utils.ts        # cn() and misc utilities
-│   └── types/index.ts      # All shared TypeScript types
+│   │   ├── retry.ts                # Retry with automatic API usage tracking
+│   │   ├── env.ts                  # Environment variable helpers
+│   │   └── utils.ts                # cn() and misc utilities
+│   └── types/index.ts              # All shared TypeScript types
 └── scripts/
-    ├── setup-wallet.ts     # Generate/import wallet + derive API creds
-    ├── derive-api-keys.ts  # Derive Polymarket CLOB API keys
-    ├── seed-config.ts      # Seed default config + mock wallet
-    └── seed-mock-data.ts   # Seed mock data for development
+    ├── setup-wallet.ts             # Generate/import wallet
+    ├── derive-api-keys.ts          # Derive CLOB API keys
+    ├── seed-config.ts              # Seed default config + mock wallet
+    └── seed-mock-data.ts           # Seed mock data
 ```
+
+## Copy Trade Dashboard (Frontend)
+
+The copy trade page (`/copy-trade`) has 5 tabs:
+
+1. **Overview** — open copy positions with P&L, recent bot activity (with model/latency badges), trader copy performance table with data source badges
+2. **Traders** — full table: score, ROI, win rate, on-chain win rate (blue), max drawdown (red), PnL, copy P&L, copy count/win rate, data source badge (Falcon/Graph/Data API), status, enable/disable/remove
+3. **Signals** — every signal with side, size, price, trader count, consensus, score, reasoning, status
+4. **Activity** — raw trader activity feed with copy status
+5. **Bot Log** — expandable log entries showing full details JSON (model, latency, validations, cycle data)
+
+Top of page: quick controls (start/pause, copy-only, 24/7, dry-run), status badges, 8-stat KPI strip (balance, P&L, open copies, win rate, traders, signals, API calls today, LLM model), data sources status bar with live call counts and latency.
+
+## Settings Page
+
+- **Mock Wallet** — initialize, reset, view balance/invested/P&L/trade count
+- **API Usage** — per-service table: today + 7-day call counts, avg latency, error rate
+- **Bot Configuration** — max trade size, max exposure, min confidence, model ID, run interval, bot enabled, copy trade only, copy trade 24/7, dry run
 
 ## Trading Modes
 
-### 1. Copy-Trading (PRIMARY — every 3 min)
-Pipeline: Discover Top Traders → Scan Activity → Detect Exits → Generate Consensus Signals → Ensemble Validation → Execute with TP/SL
+### 1. Copy-Trading (PRIMARY — every 3 min or 30s in 24/7)
+Multi-source pipeline with single-model validation. See "Copy-Trade Engine v4" above.
 
-- **ROI-based scoring** (profit/volume), not raw PnL
-- **Real win rate** calculated from actual trade history
-- **Sharpe-like consistency** scoring
-- **Exponential time decay** (7-day half-life) — stale traders drop off
-- **Position-aware filtering** — skips signals where traders are averaging down
-- **Copy-exit detection** — mirrors trader sells on your open positions
-- **Per-trader P&L attribution** — tracks your actual return from each trader
-- **Auto-disable underperformers** — drops traders with <30% copy win rate
-
-### 2. Autonomous Research Trading (every 10 min)
-Pipeline: Scan → Filter → LLM Screen → Deep Research (tools via DeepSeek) → Trade Decision → Risk Check → Execute
-
-Focuses on short-term price movements, not long-term resolution bets.
+### 2. Autonomous Research Trading (every 10 min — disabled in copy-only mode)
+Pipeline: Scan → Filter → LLM Screen → Deep Research (tools via DeepSeek) → Trade Decision → 4-Model Ensemble → Execute
 
 ### 3. Auto-Exit System (every 2 min)
 - **Take profit**: 12% gain → auto-sell
@@ -141,62 +182,19 @@ Focuses on short-term price movements, not long-term resolution bets.
 - **Time stop**: 3-day max hold
 - **Copy exit**: mirrors when tracked trader sells
 
-### 4. CEX Convergence Trading
-Detects price lag between Binance/Coinbase and Polymarket prediction markets.
-
-### 5. Whale Tracking ($10K+ Trades)
-Monitors for large trades, volume spikes, and potential insider activity.
-
-## Copy-Trader v2 Scoring Weights
-
-| Factor | Weight | Description |
-|--------|--------|-------------|
-| ROI | 30% | Profit / volume (capital efficiency) |
-| Real Win Rate | 25% | Actual wins from trade history |
-| Consistency | 20% | Sharpe-like: mean return / stddev |
-| Volume | 10% | Proves conviction (log-normalized) |
-| Recency | 15% | 7d ranking matters most |
-
-All scores get exponential time decay (half-life: 7 days of inactivity).
-
-## Market Scoring (Short-Term Focus)
-
-- Favors markets resolving in **hours to 3 days** (peak at ~24 hours)
-- Filters out markets > 14 days away
-- Minimum 2 hours to resolution (avoids last-second illiquidity)
-- Lower volume threshold ($5K) for short-term markets
-- Scores near-certain outcomes (>85% or <15%) as high-edge if close to resolution
-
 ## Cron Jobs
 
 | Job | Interval | Function |
 |-----|----------|----------|
 | Autonomous agent cycle | 10 min | `runAgentCycle` |
-| Copy-trade cycle | 3 min | `runCopyTradeCycle` |
+| Copy-trade cycle | 3 min (or 30s in 24/7) | `runCopyTradeCycle` |
 | Trader leaderboard refresh | 4 hours | `refreshTrackedTraders` |
 | Position refresh + auto-exit | 2 min | `refreshPositions` |
 | Daily analytics | Midnight UTC | `computeDailyAnalytics` |
 
 ## Database Tables (Convex)
 
-`trades`, `positions` (with TP/SL/copiedFrom), `trackedTraders` (with ROI/consistency/copyPnl), `traderActivity`, `traderPerformance`, `copyTradeSignals`, `agentActions`, `markets`, `analytics`, `config`, `wallet`, `ensembleVotes`, `whaleAlerts`, `convergenceSignals`
-
-## Polymarket API Endpoints
-
-| API | Base URL | Used For |
-|-----|----------|----------|
-| Gamma API | `https://gamma-api.polymarket.com` | Trending markets, market search, event data |
-| CLOB API | `https://clob.polymarket.com` | Orderbook, midpoint prices, placing orders |
-| Data API | `https://data-api.polymarket.com` | Leaderboard, trader activity, positions |
-
-### Leaderboard API (correct format)
-```
-GET https://data-api.polymarket.com/v1/leaderboard
-  ?timePeriod=WEEK    # DAY, WEEK, MONTH, ALL
-  &orderBy=PNL        # PNL or VOL
-  &limit=25
-  &category=OVERALL
-```
+`trades`, `positions` (TP/SL/copiedFrom), `trackedTraders` (ROI/consistency/copyPnl/onChainWinRate/maxDrawdown/dataSource), `traderActivity`, `traderPerformance`, `copyTradeSignals`, `agentActions`, `markets`, `analytics`, `config`, `wallet`, `ensembleVotes`, `whaleAlerts`, `convergenceSignals`, `apiUsage`
 
 ## Environment Variables
 
@@ -207,13 +205,21 @@ OPENROUTER_API_KEY=           # For all LLM access (single key)
 CONVEX_DEPLOYMENT=            # Convex deployment identifier
 ```
 
+Copy trade data sources (all optional, graceful fallback):
+```
+FALCON_API_KEY=               # Falcon API (polymarketanalytics.com) — trader stats
+THEGRAPH_API_KEY=             # The Graph subgraph API key — on-chain win rates
+BITQUERY_API_KEY=             # Bitquery v2 streaming API — real-time trade feeds
+ALCHEMY_RPC_URL=              # Alchemy Polygon PoS RPC — on-chain event monitoring
+# or QUICKNODE_RPC_URL=       # QuickNode alternative
+```
+
 For live trading:
 ```
 POLYMARKET_PRIVATE_KEY=       # Wallet private key
 POLYMARKET_API_KEY=           # CLOB API key
 POLYMARKET_API_SECRET=        # CLOB API secret
 POLYMARKET_API_PASSPHRASE=    # CLOB API passphrase
-POLYMARKET_FUNDER_ADDRESS=    # Optional, defaults to signer
 ```
 
 Optional research tools:
@@ -223,6 +229,33 @@ PERPLEXITY_API_KEY=           # Real-time Q&A
 APIFY_API_TOKEN=              # Social sentiment
 ```
 
+## Polymarket Contract Addresses (Polygon PoS, Chain 137)
+
+| Contract | Address |
+|----------|---------|
+| CTF Exchange | `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E` |
+| Conditional Tokens (CTF) | `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045` |
+| NegRisk CTF Exchange | `0xC5d563A36AE78145C45a50134d48A1215220f80a` |
+
+## Dev Server Logging
+
+Every LLM call logs to terminal:
+```
+[LLM] ➜ deepseek/deepseek-v3.2 | temp=0.1 | max_tokens=1000 | prompt: "Quick-validate..."
+[LLM] ✓ deepseek/deepseek-v3.2 | 1243ms | tokens: 450→120 (570) | response: "{"validations":..."
+```
+
+Copy trade cycle milestones:
+```
+[COPY TRADE] Cycle copy-xxx started | balance: $487.50
+[COPY TRADE] Step 1: Loading tracked traders...
+[DATA SOURCES] Active: falcon, subgraph, bitquery, alchemy, data_api
+[DATA] Leaderboard from Falcon: 50 traders
+[DATA] Win rate for 0x1234... from Subgraph (on-chain): 62%
+[COPY TRADE] Step 4: LLM validation for 2 signals...
+[COPY TRADE] ✓ [DRY] buy_yes "Will Bitcoin..." | $8.50 @ 62.3c | trader: whale_trader
+```
+
 ## Commands
 
 ```bash
@@ -230,36 +263,30 @@ npm run dev              # Start Next.js dev server
 npx convex dev           # Start Convex backend (must run alongside dev)
 npm run setup-wallet     # Generate wallet + derive API credentials
 npm run seed-config      # Seed default config + initialize mock wallet
-npm run derive-keys      # Derive CLOB API keys from private key
 npm run build            # Production build
 ```
 
-Both `npm run dev` and `npx convex dev` must be running simultaneously for the app to work.
+## API Usage Tracking
+
+Every `withRetry` call automatically tracks API usage via a callback registered at the start of each Convex action. Data stored in `apiUsage` table: one row per service per day with call count, success/failure, total latency. Visible on Settings page and Copy Trade dashboard.
 
 ## Key Design Decisions
 
-- **Price trading, not resolution betting** — buy low, sell high, don't hold to expiry
 - **Copy-trading is primary** — 3-min scan cycle, exit mirroring, per-trader P&L tracking
-- **Auto-exit system** — TP (12%), SL (10%), 3-day time stop, copy-exit
-- **DeepSeek V3.2 for research** — $0.26/M input, supports tools, IMO gold medal reasoning
-- **Grok Multi-Agent for non-tool tasks** — screening, decisions (no tool calling on OpenRouter)
-- **4-model ensemble** — all support tools, diverse architectures, cost-optimized
+- **Single LLM for copy trades** — DeepSeek V3.2 only, traders are the edge not the AI
+- **Multi-source data** — Falcon → Subgraph → Bitquery → RPC → Data API fallback chain
+- **Conviction scoring** — trader portfolio % weights signal strength
+- **Fresh price execution** — CLOB midpoint fetched right before trade
+- **Price trading, not resolution betting** — buy low, sell high, don't hold to expiry
 - **Dry run mode** ON by default — simulates trades without real orders
-- **stripCodeFences()** — always strip markdown fences before JSON.parse (LLMs ignore response_format)
-- **Risk manager** enforces min confidence (0.55), max trade size ($25), max exposure ($500)
-- **FOK orders** for autonomous trades, **GTC orders** for copy-trades
-- All Convex mutations have internal variants for server-side use
-
-## TypeScript Notes
-
-- Convex generated types in `convex/_generated/` must be regenerated with `npx convex dev` or `npx convex codegen` after schema changes
-- The project uses path aliases: `@/src/*`, `@/components/*`, `@/convex/*`
-- AI SDK v6: `tool()` uses `inputSchema` not `parameters`, `stopWhen` not `maxSteps`
-- Chat UI uses `@ai-sdk/react` `useChat` hook with `sendMessage({ text })` pattern
+- **API usage tracking** — built into retry utility, zero call-site changes
+- **All third-party APIs optional** — system works with just Polymarket's APIs
 
 ## Known Issues
 
-- Grok 4.20 Multi-Agent Beta does NOT support tool calling through OpenRouter — use DeepSeek V3.2 or other tool-capable model for research
-- Polymarket Data API leaderboard endpoint requires `/v1/` prefix and specific param names (`timePeriod`, `orderBy`, `category`)
+- Grok 4.20 Multi-Agent Beta does NOT support tool calling through OpenRouter
+- Polymarket Data API leaderboard requires `/v1/` prefix and specific param names
 - LLMs return markdown-wrapped JSON even with `response_format: { type: "json_object" }` — always use `stripCodeFences()` before `JSON.parse`
-- GPT-5.4, Gemini 3 Flash, and DeepSeek V3.2 availability depends on OpenRouter — check their status page if ensemble votes fail
+- Falcon API endpoints may vary — client tries multiple URL patterns with fallback
+- The Graph subgraph schema may differ from expected — queries try multiple shapes
+- Bitquery v2 uses `streaming.bitquery.io/graphql` (not v1 REST endpoints)

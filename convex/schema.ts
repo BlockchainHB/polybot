@@ -65,7 +65,9 @@ export default defineSchema({
     // --- Enhanced scoring fields ---
     roi: v.optional(v.float64()), // profit / volume (capital efficiency)
     realWinRate: v.optional(v.float64()), // actual wins / total trades from history
+    onChainWinRate: v.optional(v.float64()), // ground-truth win rate from The Graph
     consistency: v.optional(v.float64()), // Sharpe-like: mean(returns) / stddev(returns)
+    maxDrawdown: v.optional(v.float64()), // max drawdown from Falcon API
     copyPnl: v.optional(v.float64()), // YOUR realized P&L from copying this trader
     copyTradeCount: v.optional(v.float64()), // how many times you've copied them
     copyWinCount: v.optional(v.float64()), // how many copy trades were profitable
@@ -73,6 +75,7 @@ export default defineSchema({
     avgHoldTime: v.optional(v.float64()), // avg time between entry and exit (ms)
     lastTradeAt: v.optional(v.float64()), // when the trader last traded
     disabledReason: v.optional(v.string()), // why auto-disabled (e.g. "underperformer")
+    dataSource: v.optional(v.string()), // which API provided the data (falcon, subgraph, data_api)
   })
     .index("by_address", ["address"])
     .index("by_compositeScore", ["compositeScore"])
@@ -192,6 +195,18 @@ export default defineSchema({
     cumulativeReturn: v.float64(),
   })
     .index("by_period_date", ["period", "date"]),
+
+  apiUsage: defineTable({
+    service: v.string(),
+    date: v.string(),
+    totalCalls: v.float64(),
+    successCount: v.float64(),
+    failureCount: v.float64(),
+    totalLatencyMs: v.float64(),
+    lastCalledAt: v.float64(),
+  })
+    .index("by_service_date", ["service", "date"])
+    .index("by_date", ["date"]),
 
   config: defineTable({
     key: v.string(),

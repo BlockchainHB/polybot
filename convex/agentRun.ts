@@ -81,6 +81,15 @@ export const runAgentCycle = internalAction({
     });
 
     try {
+      // Register API usage tracking
+      const { setTrackCallback } = await import("../src/lib/retry");
+      setTrackCallback((service, latencyMs, success) => {
+        const date = new Date().toISOString().slice(0, 10);
+        ctx.runMutation(internal.apiUsage.internalIncrementUsage, {
+          service, date, latencyMs, success,
+        }).catch(() => {});
+      });
+
       const { runPipeline } = await import("../src/agent/pipeline");
       const { OpenRouterProvider } = await import("../src/llm/openrouter");
       const { EnsembleProvider } = await import("../src/llm/multi-model-provider");
@@ -480,6 +489,15 @@ export const runCopyTradeCycle = internalAction({
     });
 
     try {
+      // Register API usage tracking
+      const { setTrackCallback } = await import("../src/lib/retry");
+      setTrackCallback((service, latencyMs, success) => {
+        const date = new Date().toISOString().slice(0, 10);
+        ctx.runMutation(internal.apiUsage.internalIncrementUsage, {
+          service, date, latencyMs, success,
+        }).catch(() => {});
+      });
+
       const { discoverTopTraders, scanTraderActivity, generateCopySignals, buildCopyTradeValidationPrompt, shouldDisableTrader, detectCopyExits, deduplicateTrades, fetchFreshMidpoint } =
         await import("../src/agent/copy-trader");
       const { OpenRouterProvider } = await import("../src/llm/openrouter");
